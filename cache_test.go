@@ -836,6 +836,7 @@ func BenchmarkParallelCacheSet(b *testing.B) {
 func BenchmarkMapSet(b *testing.B) {
 	m := make(map[string][]byte)
 	var key [8]byte
+	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		binary.LittleEndian.PutUint64(key[:], uint64(i))
 		m[string(key[:])] = make([]byte, 8)
@@ -1133,6 +1134,7 @@ func TestBenchmarkCacheGetWithBuf(t *testing.T) {
 	}
 }
 
+// zhmark 2024/7/10 基准测试，返回回收数
 func TestBenchmarkCacheSet(t *testing.T) {
 	alloc := testing.Benchmark(BenchmarkCacheSet).AllocsPerOp()
 	if alloc > 0 {

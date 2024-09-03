@@ -67,28 +67,41 @@ func newSegment(bufSize int, segId int, timer Timer) (seg segment) {
 }
 
 func (seg *segment) set(key, value []byte, hashVal uint64, expireSeconds int) (err error) {
+	// 检查键的长度是否超过最大限制（65535字节）
 	if len(key) > 65535 {
 		return ErrLargeKey
 	}
+
+	// key和value的总长度不能超过freecache预设大小的1/1024
 	maxKeyValLen := len(seg.rb.data)/4 - ENTRY_HDR_SIZE
 	if len(key)+len(value) > maxKeyValLen {
-		// Do not accept large entry.
+		// 如果超出限制，返回错误
 		return ErrLargeEntry
 	}
+
+	// 获取当前时间
 	now := seg.timer.Now()
 	expireAt := uint32(0)
+	// 如果设置了过期时间，则计算过期时间点
 	if expireSeconds > 0 {
 		expireAt = now + uint32(expireSeconds)
 	}
 
+	// 根据哈希值计算槽ID和哈希的低16位
 	slotId := uint8(hashVal >> 8)
 	hash16 := uint16(hashVal >> 16)
+	// 获取指定槽ID的槽
 	slot := seg.getSlot(slotId)
+	// 查找键在槽中的位置
 	idx, match := seg.lookup(slot, hash16, key)
 
+	// 创建一个固定大小的缓冲区用于存储条目的头部信息
 	var hdrBuf [ENTRY_HDR_SIZE]byte
+	// 将缓冲区转换为entryHdr类型的指针以方便操作
 	hdr := (*entryHdr)(unsafe.Pointer(&hdrBuf[0]))
+
 	if match {
+		// 如果键已存在，读取当前条目的头部信息
 		matchedPtr := &slot[idx]
 		seg.rb.ReadAt(hdrBuf[:], matchedPtr.offset)
 		hdr.slotId = slotId
@@ -99,17 +112,17 @@ func (seg *segment) set(key, value []byte, hashVal uint64, expireSeconds int) (e
 		hdr.expireAt = expireAt
 		hdr.valLen = uint32(len(value))
 		if hdr.valCap >= hdr.valLen {
-			// in place overwrite
+			// 如果条目的容量足够，直接覆盖旧值
 			atomic.AddInt64(&seg.totalTime, int64(hdr.accessTime)-int64(originAccessTime))
 			seg.rb.WriteAt(hdrBuf[:], matchedPtr.offset)
 			seg.rb.WriteAt(value, matchedPtr.offset+ENTRY_HDR_SIZE+int64(hdr.keyLen))
 			atomic.AddInt64(&seg.overwrites, 1)
 			return
 		}
-		// avoid unnecessary memory copy.
+		// 如果容量不足，删除旧条目
 		seg.delEntryPtr(slotId, slot, idx)
 		match = false
-		// increase capacity and limit entry len.
+		// 计算新容量
 		for hdr.valCap < hdr.valLen {
 			hdr.valCap *= 2
 		}
@@ -117,6 +130,7 @@ func (seg *segment) set(key, value []byte, hashVal uint64, expireSeconds int) (e
 			hdr.valCap = uint32(maxKeyValLen - len(key))
 		}
 	} else {
+		// 如果键不存在，初始化头部信息
 		hdr.slotId = slotId
 		hdr.hash16 = hash16
 		hdr.keyLen = uint16(len(key))
@@ -124,28 +138,36 @@ func (seg *segment) set(key, value []byte, hashVal uint64, expireSeconds int) (e
 		hdr.expireAt = expireAt
 		hdr.valLen = uint32(len(value))
 		hdr.valCap = uint32(len(value))
-		if hdr.valCap == 0 { // avoid infinite loop when increasing capacity.
+		if hdr.valCap == 0 { // 避免容量为零的无限循环
 			hdr.valCap = 1
 		}
 	}
 
+	// 计算条目的总长度（包括头部、键和值）
 	entryLen := ENTRY_HDR_SIZE + int64(len(key)) + int64(hdr.valCap)
+	// 尝试从槽中腾出空间
 	slotModified := seg.evacuate(entryLen, slotId, now)
 	if slotModified {
-		// the slot has been modified during evacuation, we need to looked up for the 'idx' again.
-		// otherwise there would be index out of bound error.
+		// 如果在腾出空间过程中槽被修改，需要重新查找键的位置
 		slot = seg.getSlot(slotId)
 		idx, match = seg.lookup(slot, hash16, key)
 		// assert(match == false)
 	}
+
+	// 获取新的写入偏移量
 	newOff := seg.rb.End()
+	// 插入条目到槽中
 	seg.insertEntryPtr(slotId, hash16, newOff, idx, hdr.keyLen)
+	// 写入条目的头部、键和值到缓存中
 	seg.rb.Write(hdrBuf[:])
 	seg.rb.Write(key)
 	seg.rb.Write(value)
+	// 如果实际值长度小于分配的容量，跳过未使用的空间
 	seg.rb.Skip(int64(hdr.valCap - hdr.valLen))
+	// 更新统计数据
 	atomic.AddInt64(&seg.totalTime, int64(now))
 	atomic.AddInt64(&seg.totalCount, 1)
+	// 减少可用的缓存空间
 	seg.vacuumLen -= entryLen
 	return
 }
